@@ -53,6 +53,8 @@
 #include <linux/amlogic/media/codec_mm/configs.h>
 #include "../utils/config_parser.h"
 #include "../utils/firmware.h"
+#include "../../../common/chips/decoder_cpu_ver_info.h"
+#include <linux/amlogic/tee.h>
 
 #define MIX_STREAM_SUPPORT
 #define SUPPORT_4K2K
@@ -272,7 +274,7 @@ static inline int div_r32(int64_t m, int n)
 return (int)(m/n)
 */
 #ifndef CONFIG_ARM64
-	do_div(m, n);
+	div_s64(m, n);
 	return (int)m;
 #else
 	return (int)(m/n);
@@ -3578,7 +3580,7 @@ static struct vframe_s *vavs2_vf_get(void *op_arg)
 	if (kfifo_get(&dec->display_q, &vf)) {
 		uint8_t index = vf->index & 0xff;
 
-		if (index >= 0	&& index < dec->used_buf_num) {
+		if (index < dec->used_buf_num) {
 			struct avs2_frame_s *pic = get_pic_by_index(dec, index);
 			dec->vf_get_count++;
 			avs2_print(dec, AVS2_DBG_BUFMGR,
@@ -3611,8 +3613,7 @@ static void vavs2_vf_put(struct vframe_s *vf, void *op_arg)
 		__func__, vf->index,
 		dec->vf_put_count);
 
-	if (index >= 0
-		&& index < dec->used_buf_num) {
+	if (index < dec->used_buf_num) {
 		unsigned long flags;
 		struct avs2_frame_s *pic;
 
@@ -4578,7 +4579,7 @@ static void vavs2_put_timer_func(unsigned long arg)
 	if (dbg_cmd != 0) {
 		if (dbg_cmd == 1) {
 			u32 disp_laddr;
-			if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXBB &&
+			if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXBB &&
 				get_double_write_mode(dec) == 0) {
 				disp_laddr =
 					READ_VCBUS_REG(AFBC_BODY_BADDR) << 4;
@@ -4771,7 +4772,7 @@ TODO:FOR VERSION
 
 static s32 vavs2_init(struct vdec_s *vdec)
 {
-	int size = -1;
+	int ret = -1, size = -1;
 	int fw_size = 0x1000 * 16;
 	struct firmware_s *fw = NULL;
 	struct AVS2Decoder_s *dec = (struct AVS2Decoder_s *)vdec->private;
@@ -4784,20 +4785,14 @@ static s32 vavs2_init(struct vdec_s *vdec)
 	fw = vmalloc(sizeof(struct firmware_s) + fw_size);
 	if (IS_ERR_OR_NULL(fw))
 		return -ENOMEM;
-#ifdef MULTI_INSTANCE_SUPPORT
-	if (tee_enabled()) {
-		size = 1;
-		pr_debug ("laod\n");
-	} else
-#endif
+
 	size = get_firmware_data(VIDEO_DEC_AVS2_MMU, fw->data);
 	if (size < 0) {
 		pr_err("get firmware fail.\n");
 		vfree(fw);
 		return -1;
 	}
-	avs2_print(dec, AVS2_DBG_BUFMGR,
-		"firmware size %d\n", size);
+
 	fw->len = fw_size;
 
 	if (dec->m_ins_flag) {
@@ -4817,18 +4812,18 @@ static s32 vavs2_init(struct vdec_s *vdec)
 	}
 
 	amhevc_enable();
-	if (size == 1)
-		pr_info ("tee load ok\n");
 
-	if (amhevc_loadmc_ex(VFORMAT_AVS2, NULL, fw->data) < 0) {
+	ret = amhevc_loadmc_ex(VFORMAT_AVS2, NULL, fw->data);
+	if (ret < 0) {
 		amhevc_disable();
 		vfree(fw);
+		pr_err("AVS2: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
-	avs2_print(dec, AVS2_DBG_BUFMGR,
-		"firmware size %d\n", size);
 
 	vfree(fw);
+
 	dec->stat |= STAT_MC_LOAD;
 
 	/* enable AMRISC side protocol */
@@ -5386,16 +5381,16 @@ static void run(struct vdec_s *vdec, unsigned long mask,
 			dec->frame_count, r,
 			dec->chunk ? dec->chunk->size : 0,
 			dec->chunk ? dec->chunk->offset : 0,
-			(vdec_frame_based(vdec) &&
+			dec->chunk ? ((vdec_frame_based(vdec) &&
 			(debug & PRINT_FLAG_VDEC_STATUS)) ?
-			get_data_check_sum(dec, r) : 0,
+			get_data_check_sum(dec, r) : 0) : 0,
 		READ_VREG(HEVC_STREAM_START_ADDR),
 		READ_VREG(HEVC_STREAM_END_ADDR),
 		READ_VREG(HEVC_STREAM_LEVEL),
 		READ_VREG(HEVC_STREAM_WR_PTR),
 		READ_VREG(HEVC_STREAM_RD_PTR),
 		dec->start_shift_bytes);
-		if (vdec_frame_based(vdec)) {
+		if (vdec_frame_based(vdec) && dec->chunk) {
 			u8 *data = ((u8 *)dec->chunk->block->start_virt) +
 				dec->chunk->offset;
 			avs2_print_cont(dec, 0, "data adr %p:",
@@ -5416,6 +5411,8 @@ static void run(struct vdec_s *vdec, unsigned long mask,
 		amhevc_disable();
 		avs2_print(dec, 0,
 			"%s: Error amvdec_loadmc fail\n", __func__);
+		dec->dec_result = DEC_RESULT_FORCE_EXIT;
+		vdec_schedule_work(&dec->work);
 		return;
 	} else
 		vdec->mc_loaded = 1;
@@ -5430,7 +5427,7 @@ static void run(struct vdec_s *vdec, unsigned long mask,
 
 	WRITE_VREG(HEVC_DEC_STATUS_REG, AVS2_ACTION_DONE);
 
-	if (vdec_frame_based(vdec)) {
+	if (vdec_frame_based(vdec) && dec->chunk) {
 		if (debug & PRINT_FLAG_VDEC_DATA)
 			dump_data(dec, dec->chunk->size);
 
@@ -5672,11 +5669,11 @@ static int ammvdec_avs2_probe(struct platform_device *pdev)
 
 	dec->platform_dev = pdev;
 	dec->video_signal_type = 0;
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_TXLX)
+	if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_TXLX)
 		dec->stat |= VP9_TRIGGER_FRAME_ENABLE;
 #if 1
 	if ((debug & IGNORE_PARAM_FROM_CONFIG) == 0 &&
-			pdata->config && pdata->config_len) {
+			pdata->config_len) {
 		/*use ptr config for doubel_write_mode, etc*/
 		avs2_print(dec, 0, "pdata->config=%s\n", pdata->config);
 		if (get_config_int(pdata->config, "avs2_double_write_mode",
@@ -5760,13 +5757,6 @@ static int ammvdec_avs2_probe(struct platform_device *pdev)
 	dec->init_flag = 0;
 	dec->fatal_error = 0;
 	dec->show_frame_num = 0;
-	if (pdata == NULL) {
-		pr_info("\namvdec_avs2 memory resource undefined.\n");
-		uninit_mmu_buffers(dec);
-		/* devm_kfree(&pdev->dev, (void *)dec); */
-		vfree((void *)dec);
-		return -EFAULT;
-	}
 
 	if (debug) {
 		pr_info("===AVS2 decoder mem resource 0x%lx size 0x%x\n",
@@ -5915,7 +5905,7 @@ static int __init amvdec_avs2_driver_init_module(void)
 		return -ENODEV;
 	}
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXL
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXL
 		/*&& get_cpu_type() != MESON_CPU_MAJOR_ID_GXLX*/) {
 		if (vdec_is_support_4k())
 			amvdec_avs2_profile.profile =

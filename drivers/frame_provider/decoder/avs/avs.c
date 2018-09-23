@@ -41,6 +41,8 @@
 #include "../utils/decoder_mmu_box.h"
 #include "../utils/decoder_bmmu_box.h"
 #include "../utils/firmware.h"
+#include "../../../common/chips/decoder_cpu_ver_info.h"
+#include <linux/amlogic/tee.h>
 
 #define DRIVER_NAME "amvdec_avs"
 #define MODULE_NAME "amvdec_avs"
@@ -417,7 +419,7 @@ static void vavs_isr(void)
 	u32 picture_type;
 	u32 buffer_index;
 
-	unsigned int pts, pts_valid = 0, offset;
+	unsigned int pts, pts_valid = 0, offset = 0;
 	u64 pts_us64;
 	if (debug_flag & AVS_DEBUG_UCODE) {
 		if (READ_VREG(AV_SCRATCH_E) != 0) {
@@ -1488,7 +1490,7 @@ static void init_avsp_long_cabac_buf(void)
 
 static s32 vavs_init(void)
 {
-	int r, size = -1;
+	int ret, size = -1;
 	char *buf = vmalloc(0x1000 * 16);
 
 	if (IS_ERR_OR_NULL(buf))
@@ -1503,7 +1505,7 @@ static s32 vavs_init(void)
 
 	vavs_local_init();
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXM)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXM)
 		size = get_firmware_data(VIDEO_DEC_AVS, buf);
 	else {
 		if (firmware_sel == 1)
@@ -1523,19 +1525,18 @@ static s32 vavs_init(void)
 		return -1;
 	}
 
-	if (size == 1)
-		pr_info("tee load ok\n");
-
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXM)
-		size = amvdec_loadmc_ex(VFORMAT_AVS, NULL, buf);
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXM)
+		ret = amvdec_loadmc_ex(VFORMAT_AVS, NULL, buf);
 	else if (firmware_sel == 1)
-		size = amvdec_loadmc_ex(VFORMAT_AVS, "avs_no_cabac", buf);
+		ret = amvdec_loadmc_ex(VFORMAT_AVS, "avs_no_cabac", buf);
 	else
-		size = amvdec_loadmc_ex(VFORMAT_AVS, NULL, buf);
+		ret = amvdec_loadmc_ex(VFORMAT_AVS, NULL, buf);
 
-	if (size < 0) {
+	if (ret < 0) {
 		amvdec_disable();
 		vfree(buf);
+		pr_err("AVS: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 
@@ -1544,9 +1545,9 @@ static s32 vavs_init(void)
 	stat |= STAT_MC_LOAD;
 
 	/* enable AMRISC side protocol */
-	r = vavs_prot_init();
-	if (r < 0)
-		return r;
+	ret = vavs_prot_init();
+	if (ret < 0)
+		return ret;
 
 #ifdef HANDLE_AVS_IRQ
 	if (vdec_request_irq(VDEC_IRQ_1, vavs_isr,
@@ -1608,7 +1609,7 @@ static int amvdec_avs_probe(struct platform_device *pdev)
 		pr_info("amvdec_avs memory resource undefined.\n");
 		return -EFAULT;
 	}
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXM || disable_longcabac_trans)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXM || disable_longcabac_trans)
 		firmware_sel = 1;
 
 	if (firmware_sel == 1) {
@@ -1808,7 +1809,7 @@ static int __init amvdec_avs_driver_init_module(void)
 		return -ENODEV;
 	}
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXBB)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXBB)
 		amvdec_avs_profile.profile = "avs+";
 
 	vcodec_profile_register(&amvdec_avs_profile);

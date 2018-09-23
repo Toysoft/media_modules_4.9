@@ -29,7 +29,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include "amports_priv.h"
-
+#include "../../common/chips/decoder_cpu_ver_info.h"
 #define INFO_VALID ((astream_dev) && (astream_dev->format))
 
 struct astream_device_s {
@@ -224,12 +224,13 @@ s32 adec_init(struct stream_port_s *port)
 	astream_dev->datawidth = port->adatawidth;
 
 	/*wmb();don't need it...*/
-	if (af <= ARRAY_SIZE(astream_format))
+	if (af < ARRAY_SIZE(astream_format))
 		astream_dev->format = astream_format[af];
 	else
 		astream_dev->format = NULL;
 	return 0;
 }
+EXPORT_SYMBOL(adec_init);
 
 s32 adec_release(enum aformat_e vf)
 {
@@ -242,13 +243,14 @@ s32 adec_release(enum aformat_e vf)
 
 	return 0;
 }
+EXPORT_SYMBOL(adec_release);
 
 int amstream_adec_show_fun(const char *trigger, int id, char *sbuf, int size)
 {
 	int ret = -1;
 	void *buf, *getbuf = NULL;
 	if (size < PAGE_SIZE) {
-		void *getbuf = (void *)__get_free_page(GFP_KERNEL);
+		getbuf = (void *)__get_free_page(GFP_KERNEL);
 		if (!getbuf)
 			return -ENOMEM;
 		buf = getbuf;
@@ -275,7 +277,7 @@ int amstream_adec_show_fun(const char *trigger, int id, char *sbuf, int size)
 		ret = -1;
 	}
 	if (ret > 0 && getbuf != NULL) {
-		int ret = min_t(int, ret, size);
+		ret = min_t(int, ret, size);
 		strncpy(sbuf, buf, ret);
 	}
 	if (getbuf != NULL)
@@ -326,7 +328,7 @@ s32 astream_dev_register(void)
 		goto err_2;
 	}
 
-	if (MESON_CPU_MAJOR_ID_TXL < get_cpu_type()) {
+	if (AM_MESON_CPU_MAJOR_ID_TXL < get_cpu_major_id()) {
 		node = of_find_node_by_path("/codec_io/io_cbus_base");
 		if (!node) {
 			pr_info("No io_cbus_base node found.");
@@ -343,7 +345,7 @@ s32 astream_dev_register(void)
 		astream_dev->offset = -0x100;
 
 		/*need to offset -0x180 in g12a.*/
-		if (MESON_CPU_MAJOR_ID_G12A <= get_cpu_type())
+		if (AM_MESON_CPU_MAJOR_ID_G12A <= get_cpu_major_id())
 			astream_dev->offset = -0x180;
 
 		astream_uio_info.mem[0].addr =

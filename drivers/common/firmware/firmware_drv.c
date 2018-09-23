@@ -79,15 +79,12 @@ int get_firmware_data(unsigned int format, char *buf)
 	struct fw_mgr_s *mgr = g_mgr;
 	struct fw_info_s *info;
 
-	if (tee_enabled()) {
-		pr_info ("tee load firmware fomat = %d\n",(u32)format);
-		ret = tee_load_video_fw((u32)format, 0);
-		if (ret == 0)
-			ret = 1;
-		else
-			ret = -1;
-		return ret;
-	}
+	pr_info("[%s], the fw (%s) will be loaded.\n",
+		tee_enabled() ? "TEE" : "LOCAL",
+		get_fw_format_name(format));
+
+	if (tee_enabled())
+		return 0;
 
 	mutex_lock(&mutex);
 
@@ -120,7 +117,7 @@ int get_data_from_name(const char *name, char *buf)
 	struct fw_info_s *info;
 	char *fw_name = __getname();
 
-	if (IS_ERR_OR_NULL(fw_name))
+	if (fw_name == NULL)
 		return -ENOMEM;
 
 	strcat(fw_name, name);
@@ -394,7 +391,7 @@ static int fw_info_fill(void)
 	char *path = __getname();
 	const char *name;
 
-	if (IS_ERR_OR_NULL(path))
+	if (path == NULL)
 		return -ENOMEM;
 
 	for (i = 0; i < info_size; i++) {
@@ -408,7 +405,7 @@ static int fw_info_fill(void)
 			continue;
 
 		files = kzalloc(sizeof(struct fw_files_s), GFP_KERNEL);
-		if (IS_ERR_OR_NULL(files)) {
+		if (files == NULL) {
 			__putname(path);
 			return -ENOMEM;
 		}
@@ -416,7 +413,9 @@ static int fw_info_fill(void)
 		files->file_type = ucode_info[i].file_type;
 		files->fw_type = ucode_info[i].fw_type;
 		strncpy(files->path, path, sizeof(files->path));
+		files->path[sizeof(files->path) - 1] = '\0';
 		strncpy(files->name, name, sizeof(files->name));
+		files->name[sizeof(files->name) - 1] = '\0';
 
 		list_add(&files->node, &mgr->files_head);
 	}
@@ -497,9 +496,13 @@ static int fw_check_pack_version(char *buf)
 {
 	struct package_s *pack = NULL;
 	int major, minor, rev, ver = 0;
+	int ret;
 
 	pack = (struct package_s *) buf;
-	sscanf(PACK_VERS, "v%x.%x.%x", &major, &minor, &rev);
+	ret = sscanf(PACK_VERS, "v%x.%x.%x", &major, &minor, &rev);
+	if (ret != 3)
+		return -1;
+
 	ver = (major << 24 | minor << 16 | rev);
 
 	pr_info("the package has %d fws totally.\n", pack->head.total);
@@ -534,7 +537,7 @@ static int fw_package_parse(struct fw_files_s *files,
 	int try_cnt = 100;
 	char *path = __getname();
 
-	if (IS_ERR_OR_NULL(path))
+	if (path == NULL)
 		return -ENOMEM;
 
 	pack_data = ((struct package_s *)buf)->data;
@@ -551,13 +554,13 @@ static int fw_package_parse(struct fw_files_s *files,
 			continue;
 
 		info = kzalloc(sizeof(struct fw_info_s), GFP_KERNEL);
-		if (IS_ERR_OR_NULL(info)) {
+		if (info == NULL) {
 			ret = -ENOMEM;
 			goto out;
 		}
 
 		data = kzalloc(FRIMWARE_SIZE, GFP_KERNEL);
-		if (IS_ERR_OR_NULL(data)) {
+		if (data == NULL) {
 			kfree(info);
 			ret = -ENOMEM;
 			goto out;
@@ -566,8 +569,10 @@ static int fw_package_parse(struct fw_files_s *files,
 		info->file_type = files->file_type;
 		strncpy(info->src_from, files->name,
 			sizeof(info->src_from));
+		info->src_from[sizeof(info->src_from) - 1] = '\0';
 		strncpy(info->name, pack_info->head.name,
 			sizeof(info->name));
+		info->name[sizeof(info->name) - 1] = '\0';
 		info->format = get_fw_format(pack_info->head.format);
 
 		len = pack_info->head.length;
@@ -604,21 +609,25 @@ static int fw_code_parse(struct fw_files_s *files,
 	struct fw_info_s *info;
 
 	info = kzalloc(sizeof(struct fw_info_s), GFP_KERNEL);
-	if (IS_ERR_OR_NULL(info))
+	if (info == NULL)
 		return -ENOMEM;
 
 	info->data = kzalloc(FRIMWARE_SIZE, GFP_KERNEL);
-	if (IS_ERR_OR_NULL(info->data))
+	if (info->data == NULL) {
+		kfree(info);
 		return -ENOMEM;
+	}
 
 	info->file_type = files->file_type;
 	strncpy(info->src_from, files->name,
 		sizeof(info->src_from));
+	info->src_from[sizeof(info->src_from) - 1] = '\0';
 	memcpy(info->data, buf, size);
 
 	if (!fw_data_check_sum(info->data)) {
 		pr_info("check sum fail !\n");
 		kfree(info->data);
+		kfree(info);
 		return -1;
 	}
 
@@ -647,7 +656,7 @@ static int fw_data_binding(void)
 	int ret = 0, magic = 0;
 	struct fw_mgr_s *mgr = g_mgr;
 	struct fw_files_s *files, *tmp;
-	char *buf = vmalloc(BUFF_SIZE);
+	char *buf = NULL;
 	int size;
 
 	if (list_empty(&mgr->files_head)) {
@@ -655,6 +664,7 @@ static int fw_data_binding(void)
 		return 0;
 	}
 
+	buf = vmalloc(BUFF_SIZE);
 	if (IS_ERR_OR_NULL(buf))
 		return -ENOMEM;
 

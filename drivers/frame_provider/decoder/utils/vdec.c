@@ -67,6 +67,7 @@
 #include <linux/amlogic/media/codec_mm/configs.h>
 #include <linux/amlogic/media/frame_sync/ptsserv.h>
 #include "secprot.h"
+#include "../../../common/chips/decoder_cpu_ver_info.h"
 
 static DEFINE_MUTEX(vdec_mutex);
 
@@ -186,6 +187,7 @@ static int get_canvas(unsigned int index, unsigned int base)
 {
 	int start;
 	int canvas_index = index * base;
+	int ret;
 
 	if ((base > 4) || (base == 0))
 		return -1;
@@ -203,17 +205,17 @@ static int get_canvas(unsigned int index, unsigned int base)
 	}
 
 	if (base == 1) {
-		return start;
+		ret = start;
 	} else if (base == 2) {
-		return ((start + 1) << 16) | ((start + 1) << 8) | start;
+		ret = ((start + 1) << 16) | ((start + 1) << 8) | start;
 	} else if (base == 3) {
-		return ((start + 2) << 16) | ((start + 1) << 8) | start;
+		ret = ((start + 2) << 16) | ((start + 1) << 8) | start;
 	} else if (base == 4) {
-		return (((start + 3) << 24) | (start + 2) << 16) |
+		ret = (((start + 3) << 24) | (start + 2) << 16) |
 			((start + 1) << 8) | start;
 	}
 
-	return -1;
+	return ret;
 }
 
 
@@ -324,7 +326,7 @@ EXPORT_SYMBOL(update_vdec_clk_config_settings);
 
 static bool hevc_workaround_needed(void)
 {
-	return (get_cpu_type() == MESON_CPU_MAJOR_ID_GXBB) &&
+	return (get_cpu_major_id() == AM_MESON_CPU_MAJOR_ID_GXBB) &&
 		(get_meson_cpu_version(MESON_CPU_VERSION_LVL_MINOR)
 			== GXBB_REV_A_MINOR);
 }
@@ -526,6 +528,13 @@ int vdec_set_pts(struct vdec_s *vdec, u32 pts)
 }
 EXPORT_SYMBOL(vdec_set_pts);
 
+void vdec_set_timestamp(struct vdec_s *vdec, u64 timestamp)
+{
+	vdec->timestamp = timestamp;
+	vdec->timestamp_valid = true;
+}
+EXPORT_SYMBOL(vdec_set_timestamp);
+
 int vdec_set_pts64(struct vdec_s *vdec, u64 pts64)
 {
 	vdec->pts64 = pts64;
@@ -536,6 +545,12 @@ int vdec_set_pts64(struct vdec_s *vdec, u64 pts64)
 	return 0;
 }
 EXPORT_SYMBOL(vdec_set_pts64);
+
+int vdec_get_status(struct vdec_s *vdec)
+{
+	return vdec->status;
+}
+EXPORT_SYMBOL(vdec_get_status);
 
 void vdec_set_status(struct vdec_s *vdec, int status)
 {
@@ -1198,7 +1213,7 @@ void vdec_clean_input(struct vdec_s *vdec)
 	while (!list_empty(&input->vframe_chunk_list)) {
 		struct vframe_chunk_s *chunk =
 			vdec_input_next_chunk(input);
-		if (chunk->flag & VFRAME_CHUNK_FLAG_CONSUMED)
+		if (chunk && (chunk->flag & VFRAME_CHUNK_FLAG_CONSUMED))
 			vdec_input_release_chunk(input, chunk);
 		else
 			break;
@@ -1343,7 +1358,7 @@ int vdec_disconnect(struct vdec_s *vdec)
 		(vdec->status != VDEC_STATUS_ACTIVE)) {
 		return 0;
 	}
-
+	mutex_lock(&vdec_mutex);
 	/*
 	 *when a vdec is under the management of scheduler
 	 * the status change will only be from vdec_core_thread
@@ -1354,16 +1369,26 @@ int vdec_disconnect(struct vdec_s *vdec)
 		vdec_set_next_status(vdec->slave, VDEC_STATUS_DISCONNECTED);
 	else if (vdec->master)
 		vdec_set_next_status(vdec->master, VDEC_STATUS_DISCONNECTED);
-
+	mutex_unlock(&vdec_mutex);
 	up(&vdec_core->sem);
 
-	wait_for_completion(&vdec->inactive_done);
+	if(!wait_for_completion_timeout(&vdec->inactive_done,
+		msecs_to_jiffies(2000)))
+		goto discon_timeout;
 
-	if (vdec->slave)
-		wait_for_completion(&vdec->slave->inactive_done);
-	else if (vdec->master)
-		wait_for_completion(&vdec->master->inactive_done);
+	if (vdec->slave) {
+		if(!wait_for_completion_timeout(&vdec->slave->inactive_done,
+			msecs_to_jiffies(2000)))
+			goto discon_timeout;
+	} else if (vdec->master) {
+		if(!wait_for_completion_timeout(&vdec->master->inactive_done,
+			msecs_to_jiffies(2000)))
+			goto discon_timeout;
+	}
 
+	return 0;
+discon_timeout:
+	pr_err("%s timeout!!! status: 0x%x\n", __func__, vdec->status);
 	return 0;
 }
 EXPORT_SYMBOL(vdec_disconnect);
@@ -1554,6 +1579,11 @@ s32 vdec_init(struct vdec_s *vdec, int is_4k)
 				"ppmgr amlvideo.1 amvide2");
 			snprintf(vdec->vfm_map_id, VDEC_MAP_NAME_SIZE,
 				"vdec-map-%d", vdec->id);
+		} else if (p->frame_base_video_path == FRAME_BASE_PATH_V4L_VIDEO) {
+			snprintf(vdec->vfm_map_chain, VDEC_MAP_NAME_SIZE,
+				"%s %s", vdec->vf_provider_name, "v4l2-video");
+			snprintf(vdec->vfm_map_id, VDEC_MAP_NAME_SIZE,
+				"vdec-map-%d", vdec->id);
 		}
 
 		if (vfm_map_add(vdec->vfm_map_id,
@@ -1677,14 +1707,14 @@ void vdec_release(struct vdec_s *vdec)
 		schedule();
 
 	platform_device_unregister(vdec->dev);
+	pr_debug("vdec_release instance %p, total %d\n", vdec,
+		atomic_read(&vdec_core->vdec_nr));
 	vdec_destroy(vdec);
 
 	mutex_lock(&vdec_mutex);
 	inited_vcodec_num--;
 	mutex_unlock(&vdec_mutex);
 
-	pr_debug("vdec_release instance %p, total %d\n", vdec,
-		atomic_read(&vdec_core->vdec_nr));
 }
 EXPORT_SYMBOL(vdec_release);
 
@@ -1710,6 +1740,11 @@ int vdec_reset(struct vdec_s *vdec)
 
 	vdec_input_release(&vdec->input);
 
+	vdec_input_init(&vdec->input, vdec);
+
+	vdec_input_prepare_bufs(&vdec->input, vdec->sys_info->width,
+		vdec->sys_info->height);
+
 	vf_reg_provider(&vdec->vframe_provider);
 	vf_notify_receiver(vdec->vf_provider_name,
 			VFRAME_EVENT_PROVIDER_START, vdec);
@@ -1730,10 +1765,10 @@ void vdec_free_cmabuf(void)
 {
 	mutex_lock(&vdec_mutex);
 
-	if (inited_vcodec_num > 0) {
+	/*if (inited_vcodec_num > 0) {
 		mutex_unlock(&vdec_mutex);
 		return;
-	}
+	}*/
 	mutex_unlock(&vdec_mutex);
 }
 
@@ -1759,7 +1794,7 @@ int vdec_core_release(struct vdec_s *vdec, unsigned long mask)
 }
 EXPORT_SYMBOL(vdec_core_release);
 
-const bool vdec_core_with_input(unsigned long mask)
+bool vdec_core_with_input(unsigned long mask)
 {
 	enum vdec_type_e type;
 
@@ -1775,7 +1810,7 @@ void vdec_core_finish_run(struct vdec_s *vdec, unsigned long mask)
 {
 	unsigned long i;
 	unsigned long t = mask;
-
+	mutex_lock(&vdec_mutex);
 	while (t) {
 		i = __ffs(t);
 		clear_bit(i, &vdec->active_mask);
@@ -1784,6 +1819,8 @@ void vdec_core_finish_run(struct vdec_s *vdec, unsigned long mask)
 
 	if (vdec->active_mask == 0)
 		vdec_set_status(vdec, VDEC_STATUS_CONNECTED);
+
+	mutex_unlock(&vdec_mutex);
 }
 EXPORT_SYMBOL(vdec_core_finish_run);
 /*
@@ -1994,6 +2031,20 @@ static void vdec_route_interrupt(struct vdec_s *vdec, unsigned long mask,
 	}
 }
 
+static void vdec_remove_reset(struct vdec_s *vdec)
+{
+	struct vdec_input_s *input = &vdec->input;
+
+	if (input->target == VDEC_INPUT_TARGET_VLD) {
+		amvdec_stop();
+		vdec_reset_core(vdec);
+	} else if (input->target == VDEC_INPUT_TARGET_HEVC) {
+		amhevc_stop();
+		hevc_reset_core(vdec);
+	}
+	pr_info(" %s  vdec %p\n", __func__, vdec);
+}
+
 /*
  * Set up secure protection for each decoder instance running.
  * Note: The operation from REE side only resets memory access
@@ -2053,7 +2104,7 @@ static int vdec_core_thread(void *data)
 
 		if (kthread_should_stop())
 			break;
-
+		mutex_lock(&vdec_mutex);
 		/* clean up previous active vdec's input */
 		list_for_each_entry(vdec, &core->connected_vdec_list, list) {
 			unsigned long mask = vdec->sched_mask &
@@ -2075,8 +2126,8 @@ static int vdec_core_thread(void *data)
 					&input->vframe_chunk_list)) {
 					struct vframe_chunk_s *chunk =
 						vdec_input_next_chunk(input);
-					if (chunk->flag &
-						VFRAME_CHUNK_FLAG_CONSUMED)
+					if (chunk && (chunk->flag &
+						VFRAME_CHUNK_FLAG_CONSUMED))
 						vdec_input_release_chunk(input,
 							chunk);
 					else
@@ -2110,12 +2161,14 @@ static int vdec_core_thread(void *data)
 			&core->connected_vdec_list, list) {
 			if ((vdec->status == VDEC_STATUS_CONNECTED) &&
 			    (vdec->next_status == VDEC_STATUS_DISCONNECTED)) {
-				if (core->active_vdec == vdec)
+				if (core->active_vdec == vdec) {
+					vdec_remove_reset(vdec);
 					core->active_vdec = NULL;
+				}
 				list_move(&vdec->list, &disconnecting_list);
 			}
 		}
-
+		mutex_unlock(&vdec_mutex);
 		/* elect next vdec to be scheduled */
 		vdec = core->active_vdec;
 		if (vdec) {
@@ -2220,7 +2273,7 @@ static int vdec_core_thread(void *data)
 		/* if there is no new work scheduled and nothing
 		 * is running, sleep 20ms
 		 */
-		if ((!worker) && (!core->sched_mask)) {
+		if ((!worker) && (!core->sched_mask) && (atomic_read(&vdec_core->vdec_nr) > 0)) {
 			usleep_range(1000, 2000);
 			up(&core->sem);
 		}
@@ -2397,8 +2450,8 @@ void vdec_poweron(enum vdec_type_e core)
 				READ_AOREG(AO_RTI_GEN_PWR_ISO0) & ~0xC0);
 		/* reset DOS top registers */
 		WRITE_VREG(DOS_VDEC_MCRCC_STALL_CTRL, 0);
-		if (get_cpu_type() >=
-			MESON_CPU_MAJOR_ID_GXBB) {
+		if (get_cpu_major_id() >=
+			AM_MESON_CPU_MAJOR_ID_GXBB) {
 			/*
 			 *enable VDEC_1 DMC request
 			 */
@@ -2538,8 +2591,8 @@ void vdec_poweroff(enum vdec_type_e core)
 	}
 
 	if (core == VDEC_1) {
-		if (get_cpu_type() >=
-			MESON_CPU_MAJOR_ID_GXBB) {
+		if (get_cpu_major_id() >=
+			AM_MESON_CPU_MAJOR_ID_GXBB) {
 			/* disable VDEC_1 DMC REQ*/
 			unsigned long flags;
 
@@ -2600,7 +2653,7 @@ void vdec_poweroff(enum vdec_type_e core)
 
 			/* disable hevc clock */
 			hevc_clock_off();
-			if (get_cpu_type() >= MESON_CPU_MAJOR_ID_G12A)
+			if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_G12A)
 				hevc_back_clock_off();
 
 			/* hevc power off */
@@ -2745,6 +2798,45 @@ int vdec_source_changed(int format, int width, int height, int fps)
 
 }
 EXPORT_SYMBOL(vdec_source_changed);
+
+void vdec_reset_core(struct vdec_s *vdec)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&vdec_spin_lock, flags);
+	codec_dmcbus_write(DMC_REQ_CTRL,
+		codec_dmcbus_read(DMC_REQ_CTRL) & (~(1 << 13)));
+	spin_unlock_irqrestore(&vdec_spin_lock, flags);
+
+	while (!(codec_dmcbus_read(DMC_CHAN_STS)
+		& (1 << 13)))
+		;
+	/*
+	 * 2: assist
+	 * 3: vld_reset
+	 * 4: vld_part_reset
+	 * 5: vfifo reset
+	 * 6: iqidct
+	 * 7: mc
+	 * 8: dblk
+	 * 9: pic_dc
+	 * 10: psc
+	 * 11: mcpu
+	 * 12: ccpu
+	 * 13: ddr
+	 * 14: afifo
+	 */
+
+	WRITE_VREG(DOS_SW_RESET0,
+		(1<<3)|(1<<4)|(1<<5));
+
+	WRITE_VREG(DOS_SW_RESET0, 0);
+
+	spin_lock_irqsave(&vdec_spin_lock, flags);
+	codec_dmcbus_write(DMC_REQ_CTRL,
+		codec_dmcbus_read(DMC_REQ_CTRL) | (1 << 13));
+	spin_unlock_irqrestore(&vdec_spin_lock, flags);
+}
+EXPORT_SYMBOL(vdec_reset_core);
 
 void hevc_reset_core(struct vdec_s *vdec)
 {
@@ -2897,7 +2989,7 @@ static ssize_t amrisc_regs_show(struct class *class,
 	unsigned int val;
 	ssize_t ret;
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8) {
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8) {
 		mutex_lock(&vdec_mutex);
 		if (!vdec_on(VDEC_1)) {
 			mutex_unlock(&vdec_mutex);
@@ -2905,7 +2997,7 @@ static ssize_t amrisc_regs_show(struct class *class,
 			ret = pbuf - buf;
 			return ret;
 		}
-	} else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	} else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 1);
@@ -2918,9 +3010,9 @@ static ssize_t amrisc_regs_show(struct class *class,
 		pbuf += sprintf(pbuf, "%s(%#x)\t:%#x(%d)\n",
 				regs[i].name, regs[i].offset, val, val);
 	}
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8)
 		mutex_unlock(&vdec_mutex);
-	else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 0);
@@ -2944,7 +3036,7 @@ static ssize_t dump_trace_show(struct class *class,
 		ret = pbuf - buf;
 		return ret;
 	}
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8) {
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8) {
 		mutex_lock(&vdec_mutex);
 		if (!vdec_on(VDEC_1)) {
 			mutex_unlock(&vdec_mutex);
@@ -2953,7 +3045,7 @@ static ssize_t dump_trace_show(struct class *class,
 			ret = pbuf - buf;
 			return ret;
 		}
-	} else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	} else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 1);
@@ -2982,9 +3074,9 @@ static ssize_t dump_trace_show(struct class *class,
 		i += 16;
 	};
 	pr_info("dump trace steps:%d finished\n", debug_trace_num);
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8)
 		mutex_unlock(&vdec_mutex);
-	else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 0);
@@ -3141,6 +3233,7 @@ static ssize_t show_debug(struct class *class,
 	struct vdec_s *vdec;
 	struct vdec_core_s *core = vdec_core;
 	unsigned long flags = vdec_core_lock(vdec_core);
+	u64 tmp;
 
 	pbuf += sprintf(pbuf,
 		"============== help:\n");
@@ -3180,11 +3273,12 @@ static ssize_t show_debug(struct class *class,
 					vdec->input_underrun_count[type]);
 				pbuf += sprintf(pbuf, "\t%d",
 					vdec->not_run_ready_count[type]);
+				tmp = vdec->run_clk[type] * 100;
+				do_div(tmp, vdec->total_clk[type]);
 				pbuf += sprintf(pbuf,
 					"\t%d%%\n",
 					vdec->total_clk[type] == 0 ? 0 :
-					(u32)((vdec->run_clk[type] * 100)
-					/ vdec->total_clk[type]));
+					(u32)tmp);
 			}
 		}
 	  }
@@ -3340,8 +3434,10 @@ EXPORT_SYMBOL(vdec_read_user_data);
 
 int vdec_wakeup_userdata_poll(struct vdec_s *vdec)
 {
-	/*if (vdec && vdec == vdec_get_default_vdec_for_userdata())
-		amstream_wakeup_userdata_poll();*/ //DEBUG_TMP
+	if (vdec && vdec == vdec_get_default_vdec_for_userdata()) {
+		if (vdec->wakeup_userdata_poll)
+			vdec->wakeup_userdata_poll();
+	}
 
 	return 0;
 }
@@ -3416,7 +3512,7 @@ static ssize_t dump_risc_mem_show(struct class *class,
 	char *pbuf = buf;
 	int ret;
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8) {
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8) {
 		mutex_lock(&vdec_mutex);
 		if (!vdec_on(VDEC_1)) {
 			mutex_unlock(&vdec_mutex);
@@ -3424,7 +3520,7 @@ static ssize_t dump_risc_mem_show(struct class *class,
 			ret = pbuf - buf;
 			return ret;
 		}
-	} else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	} else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 1);
@@ -3444,9 +3540,9 @@ static ssize_t dump_risc_mem_show(struct class *class,
 	}
 
 	/*done*/
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8)
 		mutex_unlock(&vdec_mutex);
-	else if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	else if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		/*TODO:M6 define */
 		/*
 		 *  switch_mod_gate_by_type(MOD_VDEC, 0);
@@ -3714,12 +3810,12 @@ static int vdec_probe(struct platform_device *pdev)
 
 	vdec_core->cma_dev = &pdev->dev;
 
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_M8) {
+	if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_M8) {
 		/* default to 250MHz */
 		vdec_clock_hi_enable();
 	}
 
-	if (get_cpu_type() == MESON_CPU_MAJOR_ID_GXBB) {
+	if (get_cpu_major_id() == AM_MESON_CPU_MAJOR_ID_GXBB) {
 		/* set vdec dmc request to urgent */
 		WRITE_DMCREG(DMC_AM5_CHAN_CTRL, 0x3f203cf);
 	}

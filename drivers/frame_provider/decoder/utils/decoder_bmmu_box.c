@@ -173,7 +173,7 @@ int decoder_bmmu_box_free_idx(void *handle, int idx)
 	if (!box || idx < 0 || idx >= box->max_mm_num) {
 		pr_err("can't free idx of box(%p),idx:%d  in (%d-%d)\n",
 				box, idx, 0,
-			   box->max_mm_num - 1);
+			   box ? (box->max_mm_num - 1) : 0);
 		return -1;
 	}
 	mutex_lock(&box->mutex);
@@ -298,6 +298,10 @@ int decoder_bmmu_box_alloc_idx_wait(
 	if (have_space) {
 		ret = decoder_bmmu_box_alloc_idx(handle,
 				idx, size, aligned_2n, mem_flags);
+		if (ret == -ENOMEM) {
+			pr_info("bmmu alloc idx fail, try free keep video.\n");
+			try_free_keep_video(1);
+		}
 	} else {
 		try_free_keep_video(1);
 		ret = -ENOMEM;
@@ -335,7 +339,7 @@ int decoder_bmmu_box_alloc_buf_phy(
 		 *	driver_name, idx, *buf_phy_addr, size);
 		 */
 		} else {
-		pr_info("%s malloc failed  %d\n", driver_name, idx);
+			pr_info("%s malloc failed  %d\n", driver_name, idx);
 			return -ENOMEM;
 	}
 
@@ -353,7 +357,7 @@ static int decoder_bmmu_box_dump(struct decoder_bmmu_box *box, void *buf,
 	int i;
 	if (!buf) {
 		pbuf = sbuf;
-		size = 100000;
+		size = 512;
 	}
 #define BUFPRINT(args...) \
 	do {\
@@ -397,7 +401,7 @@ static int decoder_bmmu_box_dump_all(void *buf, int size)
 	struct list_head *head, *list;
 	if (!buf) {
 		pbuf = sbuf;
-		size = 100000;
+		size = 512;
 	}
 #define BUFPRINT(args...) \
 	do {\

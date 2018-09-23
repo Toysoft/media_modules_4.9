@@ -41,6 +41,7 @@
 #include "../utils/decoder_bmmu_box.h"
 #include <linux/uaccess.h>
 #include <linux/amlogic/media/codec_mm/configs.h>
+#include <linux/amlogic/tee.h>
 
 #ifdef CONFIG_AM_VDEC_MPEG12_LOG
 #define AMLOG
@@ -56,6 +57,7 @@ MODULE_AMLOG(LOG_LEVEL_ERROR, 0, LOG_LEVEL_DESC, LOG_DEFAULT_MASK_DESC);
 #include "../utils/amvdec.h"
 #include "../utils/vdec.h"
 #include "../utils/firmware.h"
+#include "../../../common/chips/decoder_cpu_ver_info.h"
 
 #define DRIVER_NAME "amvdec_mpeg12"
 #define MODULE_NAME "amvdec_mpeg12"
@@ -757,7 +759,7 @@ static void userdata_push_do_work(struct work_struct *work)
 	}
 
 
-	if (p_userdata_mgr) {
+	if (p_userdata_mgr && ccbuf_phyAddress_virt) {
 		int new_wp;
 
 		new_wp = reg & 0xffff;
@@ -928,7 +930,9 @@ static irqreturn_t vmpeg12_isr(int irq, void *dev_id)
 			}
 
 			set_frame_info(vf);
-			vf->signal_type = 0;
+			/*pr_info("video signal type:0x%x\n",
+				READ_VREG(AV_SCRATCH_H));*/
+			vf->signal_type = READ_VREG(AV_SCRATCH_H);
 			vf->index = index;
 #ifdef NV21
 			vf->type =
@@ -1254,6 +1258,7 @@ static void vmpeg12_ppmgr_reset(void)
 #endif
 
 static void vmpeg12_reset_userdata_fifo(struct vdec_s *vdec, int bInit);
+static void vmpeg12_wakeup_userdata_poll(void);
 
 static void reset_do_work(struct work_struct *work)
 {
@@ -1473,13 +1478,15 @@ static int vmpeg12_user_data_read(struct vdec_s *vdec,
 	u8 *rec_data_start;
 	u8 *pdest_buf;
 	struct mpeg12_userdata_recored_t *p_userdata_rec;
+	unsigned long addr;
 
 
 	u32 data_size;
 	u32 res;
 	int copy_ok = 1;
 
-	pdest_buf = (void *)(puserdata_para->pbuf_addr);
+	addr = puserdata_para->pbuf_addr;
+	pdest_buf = (void *)addr;
 	mutex_lock(&userdata_mutex);
 
 	if (!p_userdata_mgr) {
@@ -1668,6 +1675,11 @@ static void vmpeg12_reset_userdata_fifo(struct vdec_s *vdec, int bInit)
 	mutex_unlock(&userdata_mutex);
 }
 
+static void vmpeg12_wakeup_userdata_poll(void)
+{
+	amstream_wakeup_userdata_poll();
+}
+
 static int vmpeg12_vdec_info_init(void)
 {
 	gvs = kzalloc(sizeof(struct vdec_info), GFP_KERNEL);
@@ -1767,13 +1779,13 @@ static int vmpeg12_canvas_init(void)
 static int vmpeg12_prot_init(void)
 {
 	int ret;
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M6) {
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M6) {
 		int save_reg = READ_VREG(POWER_CTL_VLD);
 
 		WRITE_VREG(DOS_SW_RESET0, (1 << 7) | (1 << 6) | (1 << 4));
 		WRITE_VREG(DOS_SW_RESET0, 0);
 
-		if (get_cpu_type() >= MESON_CPU_MAJOR_ID_M8) {
+		if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8) {
 
 			READ_VREG(DOS_SW_RESET0);
 			READ_VREG(DOS_SW_RESET0);
@@ -1921,11 +1933,12 @@ static s32 vmpeg12_init(void)
 		return -1;
 	}
 
-	if (size == 1)
-		pr_info ("tee load ok");
-	else if (amvdec_loadmc_ex(VFORMAT_MPEG12, NULL, buf) < 0) {
+	ret = amvdec_loadmc_ex(VFORMAT_MPEG12, "mpeg12", buf);
+	if (ret < 0) {
 		amvdec_disable();
 		vfree(buf);
+		pr_err("MPEG12: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 
@@ -2015,7 +2028,7 @@ static int amvdec_mpeg12_probe(struct platform_device *pdev)
 
 	pdata->user_data_read = vmpeg12_user_data_read;
 	pdata->reset_userdata_fifo = vmpeg12_reset_userdata_fifo;
-
+	pdata->wakeup_userdata_poll = vmpeg12_wakeup_userdata_poll;
 	is_reset = 0;
 
 	vmpeg12_vdec_info_init();

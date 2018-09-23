@@ -9,6 +9,8 @@
 
 #include "h264_dpb.h"
 
+#define FRAME_NUM_MAX_SIZE 0x10000
+
 #undef pr_info
 #define pr_info printk
 int dpb_print(int index, int debug_flag, const char *fmt, ...)
@@ -1464,26 +1466,28 @@ static void dpb_combine_field(struct h264_dpb_stru *p_H264_Dpb,
 		fs->frame->data_flag |= (fs->bottom_field->data_flag & 0xf0);
 #endif
 
+	if (fs->bottom_field) {
+		fs->poc = fs->frame->poc = fs->frame->frame_poc = imin(
+				fs->top_field->poc, fs->bottom_field->poc);
 
-	fs->poc = fs->frame->poc = fs->frame->frame_poc = imin(
-			fs->top_field->poc, fs->bottom_field->poc);
+		fs->bottom_field->frame_poc = fs->top_field->frame_poc = fs->frame->poc;
 
-	fs->bottom_field->frame_poc = fs->top_field->frame_poc = fs->frame->poc;
+		fs->bottom_field->top_poc = fs->frame->top_poc = fs->top_field->poc;
+		fs->top_field->bottom_poc = fs->frame->bottom_poc =
+				fs->bottom_field->poc;
 
-	fs->bottom_field->top_poc = fs->frame->top_poc = fs->top_field->poc;
-	fs->top_field->bottom_poc = fs->frame->bottom_poc =
-			fs->bottom_field->poc;
-
-	fs->frame->used_for_reference = (fs->top_field->used_for_reference &&
-					 fs->bottom_field->used_for_reference);
-	fs->frame->is_long_term = (fs->top_field->is_long_term &&
-				   fs->bottom_field->is_long_term);
+		fs->frame->used_for_reference = (fs->top_field->used_for_reference &&
+						 fs->bottom_field->used_for_reference);
+		fs->frame->is_long_term = (fs->top_field->is_long_term &&
+					   fs->bottom_field->is_long_term);
+	}
 
 	if (fs->frame->is_long_term)
 		fs->frame->long_term_frame_idx = fs->long_term_frame_idx;
 
 	fs->frame->top_field    = fs->top_field;
-	fs->frame->bottom_field = fs->bottom_field;
+	if (fs->bottom_field)
+		fs->frame->bottom_field = fs->bottom_field;
 	fs->frame->frame = fs->frame;
 
 	fs->frame->coded_frame = 0;
@@ -1500,12 +1504,13 @@ static void dpb_combine_field(struct h264_dpb_stru *p_H264_Dpb,
 		fs->frame->frame_crop_right_offset =
 			fs->top_field->frame_crop_right_offset;
 	}
-
-	fs->top_field->frame = fs->bottom_field->frame = fs->frame;
-	fs->top_field->top_field = fs->top_field;
-	fs->top_field->bottom_field = fs->bottom_field;
-	fs->bottom_field->top_field = fs->top_field;
-	fs->bottom_field->bottom_field = fs->bottom_field;
+	if (fs->bottom_field) {
+		fs->top_field->frame = fs->bottom_field->frame = fs->frame;
+		fs->top_field->top_field = fs->top_field;
+		fs->top_field->bottom_field = fs->bottom_field;
+		fs->bottom_field->top_field = fs->top_field;
+		fs->bottom_field->bottom_field = fs->bottom_field;
+	}
 
 	/**/
 #if (MVC_EXTENSION_ENABLE)
@@ -1657,6 +1662,7 @@ static void insert_picture_in_dpb(struct h264_dpb_stru *p_H264_Dpb,
 
 	fs->pts = p->pts;
 	fs->pts64 = p->pts64;
+	fs->timestamp = p->timestamp;
 }
 
 void reset_frame_store(struct h264_dpb_stru *p_H264_Dpb,
@@ -2828,12 +2834,12 @@ static void unmark1(struct DecodedPictureBuffer *p_Dpb,
 	unsigned int curr_frame_num, int i)
 {
 	if (p_Dpb->last_picture) {
-		if ((p_Dpb->last_picture != p_Dpb->fs_ltref[i]) ||
-			p_Dpb->last_picture->frame_num != curr_frame_num) {
+		/*if ((p_Dpb->last_picture != p_Dpb->fs_ltref[i]) ||
+			p_Dpb->last_picture->frame_num != curr_frame_num) {*/
 			unmark_for_long_term_reference(p_Dpb->fs_ltref[i]);
-		} else {
+		/*} else {
 			unmark_for_long_term_reference(p_Dpb->fs_ltref[i]);
-		}
+		}*/
 	}
 }
 
@@ -3446,7 +3452,8 @@ int store_picture_in_dpb(struct h264_dpb_stru *p_H264_Dpb,
 	while (remove_unused_frame_from_dpb(p_H264_Dpb))
 		;
 
-	while (output_frames(p_H264_Dpb, 0))
+	while (output_frames(p_H264_Dpb,
+		(p_H264_Dpb->fast_output_enable == H264_OUTPUT_MODE_FAST)))
 		;
 
 	/* check for duplicate frame number in short term reference buffer */
@@ -3500,6 +3507,11 @@ int store_picture_in_dpb(struct h264_dpb_stru *p_H264_Dpb,
 	update_ltref_list(p_Dpb);
 
 	check_num_ref(p_Dpb);
+
+	if (p_H264_Dpb->fast_output_enable == H264_OUTPUT_MODE_FAST) {
+		while (output_frames(p_H264_Dpb,	1))
+			;
+	}
 
 	dump_dpb(p_Dpb, 0);
 	p_Dpb->first_pic_done = 1; /*by rain*/
@@ -5602,6 +5614,7 @@ int h264_slice_header_process(struct h264_dpb_stru *p_H264_Dpb)
 		p_Vid->pre_frame_num,
 		p_Vid->max_frame_num);
 		if (p_Vid->recovery_point == 0 &&
+			p_Vid->max_frame_num <= FRAME_NUM_MAX_SIZE &&
 			currSlice->frame_num != p_Vid->pre_frame_num &&
 			currSlice->frame_num !=
 			(p_Vid->pre_frame_num + 1) % p_Vid->max_frame_num) {

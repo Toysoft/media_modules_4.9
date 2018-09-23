@@ -1438,7 +1438,6 @@ static s32 vh264_4k2k_init(void)
 
 	if (H264_4K2K_SINGLE_CORE)
 		size = get_firmware_data(VIDEO_DEC_H264_4k2K_SINGLE, buf);
-
 	else
 		size = get_firmware_data(VIDEO_DEC_H264_4k2K, buf);
 
@@ -1448,11 +1447,18 @@ static s32 vh264_4k2k_init(void)
 		return -1;
 	}
 
-	if (amvdec_loadmc_ex(VFORMAT_H264_4K2K, NULL, buf) < 0) {
+	if (H264_4K2K_SINGLE_CORE)
+		ret = amvdec_loadmc_ex(VFORMAT_H264_4K2K, "single_core", buf);
+	else
+		ret = amvdec_loadmc_ex(VFORMAT_H264_4K2K, NULL, buf);
+
+	if (ret < 0) {
 		amvdec_disable();
 		dma_free_coherent(amports_get_dma_device(),
 			MC_TOTAL_SIZE, mc_cpu_addr, mc_dma_handle);
 		mc_cpu_addr = NULL;
+		pr_err("H264_4K2K: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 
@@ -1776,7 +1782,7 @@ static int __init amvdec_h264_4k2k_driver_init_module(void)
 		pr_err("failed to register amvdec_h264_4k2k driver\n");
 		return -ENODEV;
 	}
-	if (get_cpu_type() < MESON_CPU_MAJOR_ID_GXTVBB)
+	if (get_cpu_major_id() < AM_MESON_CPU_MAJOR_ID_GXTVBB)
 		vcodec_profile_register(&amvdec_h264_4k2k_profile);
 	INIT_REG_NODE_CONFIGS("media.decoder", &h264_4k2k_node,
 		"h264_4k2k", h264_4k2k_configs, CONFIG_FOR_RW);

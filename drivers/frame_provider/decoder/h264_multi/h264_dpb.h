@@ -19,6 +19,7 @@
 #define RRINT_FLAG_RPM                0x0400
 #define DEBUG_DISABLE_RUNREADY_RMBUF  0x0800
 #define PRINT_FLAG_DUMP_BUFSPEC       0x1000
+#define PRINT_FLAG_V4L_DETAIL         0x8000
 #define DISABLE_ERROR_HANDLE          0x10000
 #define DEBUG_DUMP_STAT               0x80000
 
@@ -27,6 +28,9 @@
 #define PRINTREFLIST  0
 
 #define MAX_LIST_SIZE 33
+
+#define H264_OUTPUT_MODE_NORMAL 0x4
+#define H264_OUTPUT_MODE_FAST   0x8
 
 #define FALSE 0
 
@@ -46,6 +50,10 @@
 #define H264_DECODE_TIMEOUT         0x21
 #define H264_SEARCH_BUFEMPTY        0x22
 #define H264_DECODE_OVER_SIZE       0x23
+
+#define VIDEO_SIGNAL_LOW						0x26
+#define VIDEO_SIGNAL_HIGHT						0x27
+
 
 #define H264_FIND_NEXT_PIC_NAL              0x50
 #define H264_FIND_NEXT_DVEL_NAL             0x51
@@ -646,6 +654,7 @@ struct StorablePicture {
 
 	u32         pts;
 	u64         pts64;
+	u64         timestamp;
 	unsigned char data_flag;
 };
 
@@ -709,6 +718,7 @@ struct FrameStore {
 
 	u32       pts;
 	u64       pts64;
+	u64       timestamp;
 };
 
 

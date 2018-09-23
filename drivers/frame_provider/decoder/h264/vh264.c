@@ -54,6 +54,7 @@
 #include <linux/amlogic/media/codec_mm/configs.h>
 #include "../utils/firmware.h"
 #include <linux/amlogic/tee.h>
+#include "../../../common/chips/decoder_cpu_ver_info.h"
 
 #define DRIVER_NAME "amvdec_h264"
 #define MODULE_NAME "amvdec_h264"
@@ -767,6 +768,7 @@ static void userdata_push_do_work(struct work_struct *work)
 	unsigned int sei_itu35_data_length;
 	struct userdata_poc_info_t user_data_poc;
 
+	memset(&user_data_poc, 0x0, sizeof(struct userdata_poc_info_t));
 	sei_itu35_flags = READ_VREG(AV_SCRATCH_J);
 	sei_itu35_wp = (sei_itu35_flags >> 16) & 0xffff;
 	sei_itu35_data_length = sei_itu35_flags & 0x7fff;
@@ -950,11 +952,12 @@ static void vh264_set_params(struct work_struct *work)
 	if (ucode_type == UCODE_IP_ONLY_PARAM)
 		mb_mv_byte = 96;
 	mb_width = mb_width & 0xff;
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXTVBB) {
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXTVBB) {
 		if (!mb_width && mb_total)
 			mb_width = 256;
 	}
-	mb_height = mb_total / mb_width;
+	if (mb_width)
+		mb_height = mb_total / mb_width;
 	last_duration = 0;
 	/* AV_SCRATCH_2
 	 *  bit 15: frame_mbs_only_flag
@@ -1032,7 +1035,7 @@ static void vh264_set_params(struct work_struct *work)
 	if (max_dpb_size < max_reference_size)
 		max_dpb_size = max_reference_size;
 	if (max_dpb_size > 15
-		&& get_cpu_type() >= MESON_CPU_MAJOR_ID_GXTVBB
+		&& get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXTVBB
 		&& (codec_mm_get_total_size() < 80 * SZ_1M)) {
 				actual_dpb_size
 				= max_reference_size + dpb_size_adj;
@@ -2207,7 +2210,7 @@ static void vh264_put_timer_func(unsigned long arg)
 		struct vframe_s *vf;
 
 		if (kfifo_get(&recycle_q, &vf)) {
-			if ((vf->index >= 0) && (vf->index < VF_BUF_NUM)) {
+			if (vf->index < VF_BUF_NUM) {
 				if (--vfbuf_use[vf->index] == 0) {
 					if (READ_VREG(AV_SCRATCH_7) == 0) {
 						WRITE_VREG(AV_SCRATCH_7,
@@ -2230,8 +2233,7 @@ static void vh264_put_timer_func(unsigned long arg)
 			struct vframe_s *vf;
 
 			if (kfifo_get(&recycle_q, &vf)) {
-				if ((vf->index >= 0 &&
-					(vf->index < VF_BUF_NUM))) {
+				if (vf->index < VF_BUF_NUM) {
 					vf->index = VF_BUF_NUM;
 					kfifo_put(&newframe_q,
 						(const struct vframe_s *)vf);
@@ -2394,7 +2396,7 @@ static void vh264_prot_init(void)
 	WRITE_VREG(AV_SCRATCH_I, (u32)(sei_data_buffer_phys - buf_offset));
 	WRITE_VREG(AV_SCRATCH_J, 0);
 	/* #if MESON_CPU_TYPE >= MESON_CPU_TYPE_MESON8 */
-	if ((get_cpu_type() >= MESON_CPU_MAJOR_ID_M8) && !is_meson_mtvd_cpu()) {
+	if ((get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_M8) && !is_meson_mtvd_cpu()) {
 		/* pr_info("vh264 meson8 prot init\n"); */
 		WRITE_VREG(MDEC_PIC_DC_THRESH, 0x404038aa);
 	}
@@ -2444,7 +2446,7 @@ static int vh264_local_init(void)
 	pr_debug("sync_outside=%d, use_idr_framerate=%d\n",
 	 sync_outside, use_idr_framerate);
 
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXTVBB)
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXTVBB)
 		size = V_BUF_ADDR_OFFSET_NEW;
 	else
 		size = V_BUF_ADDR_OFFSET;
@@ -2573,9 +2575,12 @@ static s32 vh264_init(void)
 
 	amvdec_enable();
 	if (!firmwareloaded && tee_enabled()) {
-		if (tee_load_video_fw((u32)VIDEO_DEC_H264, 0) != 0) {
+		ret = amvdec_loadmc_ex(VFORMAT_H264, NULL, NULL);
+		if (ret < 0) {
 			amvdec_disable();
-			return -1;
+			pr_err("H264: the %s fw loading failed, err: %x\n",
+				tee_enabled() ? "TEE" : "local", ret);
+			return ret;
 		}
 	} else {
 	/* -- ucode loading (amrisc and swap code) */
@@ -2649,14 +2654,13 @@ static s32 vh264_init(void)
 		}
 		firmwareloaded = 1;
 	} else {
-		int ret = -1, size = -1;
+		int ret = -1;
 		char *buf = vmalloc(0x1000 * 16);
 
 		if (IS_ERR_OR_NULL(buf))
 			return -ENOMEM;
 
-		size = get_firmware_data(VIDEO_DEC_H264, buf);
-		if (size < 0) {
+		if (get_firmware_data(VIDEO_DEC_H264, buf) < 0) {
 			pr_err("get firmware fail.");
 			vfree(buf);
 			return -1;
@@ -2677,7 +2681,6 @@ static s32 vh264_init(void)
 		vfree(buf);
 
 		if (ret < 0) {
-			pr_err("h264 load orignal firmware error %d.\n", ret);
 			amvdec_disable();
 			if (mc_cpu_addr) {
 				dma_free_coherent(amports_get_dma_device(),
@@ -2685,6 +2688,8 @@ static s32 vh264_init(void)
 					mc_dma_handle);
 				mc_cpu_addr = NULL;
 			}
+			pr_err("H264: the %s fw loading failed, err: %x\n",
+				tee_enabled() ? "TEE" : "local", ret);
 			return -EBUSY;
 		}
 	}
@@ -3140,7 +3145,7 @@ static int __init amvdec_h264_driver_init_module(void)
 		pr_err("failed to register amvdec_h264 driver\n");
 		return -ENODEV;
 	}
-	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_GXTVBB
+	if (get_cpu_major_id() >= AM_MESON_CPU_MAJOR_ID_GXTVBB
 		&& (codec_mm_get_total_size() > 80 * SZ_1M)) {
 		amvdec_h264_profile.profile = "4k";
 	}

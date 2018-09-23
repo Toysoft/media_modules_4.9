@@ -273,7 +273,7 @@ static irqreturn_t vvc1_isr(int irq, void *dev_id)
 	u32 repeat_count;
 	u32 picture_type;
 	u32 buffer_index;
-	unsigned int pts, pts_valid = 0, offset;
+	unsigned int pts, pts_valid = 0, offset = 0;
 	u32 v_width, v_height;
 	u64 pts_us64 = 0;
 
@@ -1028,7 +1028,7 @@ static void vvc1_put_timer_func(unsigned long arg)
 
 static s32 vvc1_init(void)
 {
-	int ret = -1, size = -1;
+	int ret = -1;
 	char *buf = vmalloc(0x1000 * 16);
 	int fw_type = VIDEO_DEC_VC1;
 
@@ -1056,19 +1056,19 @@ static s32 vvc1_init(void)
 	} else
 		pr_info("not supported VC1 format\n");
 
-	size = get_firmware_data(fw_type, buf);
-	if (size < 0) {
+	if (get_firmware_data(fw_type, buf) < 0) {
 		amvdec_disable();
 		pr_err("get firmware fail.");
 		vfree(buf);
 		return -1;
 	}
 
-	if (size == 1)
-		pr_info("tee load ok\n");
-	else if (amvdec_loadmc_ex(VFORMAT_VC1, NULL, buf) < 0) {
+	ret = amvdec_loadmc_ex(VFORMAT_VC1, NULL, buf);
+	if (ret < 0) {
 		amvdec_disable();
 		vfree(buf);
+		pr_err("VC1: the %s fw loading failed, err: %x\n",
+			tee_enabled() ? "TEE" : "local", ret);
 		return -EBUSY;
 	}
 

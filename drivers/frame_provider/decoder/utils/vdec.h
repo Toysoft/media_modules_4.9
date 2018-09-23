@@ -175,6 +175,8 @@ struct vdec_s {
 	u32 pts;
 	u64 pts64;
 	bool pts_valid;
+	u64 timestamp;
+	bool timestamp_valid;
 	int flag;
 	int sched;
 	int need_more_data;
@@ -232,7 +234,7 @@ struct vdec_s {
 	int (*user_data_read)(struct vdec_s *vdec,
 			struct userdata_param_t *puserdata_para);
 	void (*reset_userdata_fifo)(struct vdec_s *vdec, int bInit);
-
+	void (*wakeup_userdata_poll)(void);
 	/* private */
 	void *private;       /* decoder per instance specific data */
 #ifdef VDEC_DEBUG_SUPPORT
@@ -383,6 +385,8 @@ extern void  vdec_count_info(struct vdec_info *vs, unsigned int err,
 
 extern bool vdec_need_more_data(struct vdec_s *vdec);
 
+extern void vdec_reset_core(struct vdec_s *vdec);
+
 extern void hevc_reset_core(struct vdec_s *vdec);
 
 extern void vdec_set_suspend_clk(int mode, int hevc);
@@ -395,7 +399,7 @@ extern int vdec_core_request(struct vdec_s *vdec, unsigned long mask);
 
 extern int vdec_core_release(struct vdec_s *vdec, unsigned long mask);
 
-extern const bool vdec_core_with_input(unsigned long mask);
+extern bool vdec_core_with_input(unsigned long mask);
 
 extern void vdec_core_finish_run(struct vdec_s *vdec, unsigned long mask);
 
@@ -416,5 +420,9 @@ extern void vdec_set_step_mode(void);
 int vdec_get_debug_flags(void);
 
 unsigned char is_mult_inc(unsigned int);
+
+int vdec_get_status(struct vdec_s *vdec);
+
+void vdec_set_timestamp(struct vdec_s *vdec, u64 timestamp);
 
 #endif				/* VDEC_H */
